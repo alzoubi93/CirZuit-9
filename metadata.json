@@ -1,0 +1,8 @@
+{
+  "name": "Remix Remix Cirzuit-footprints-8.9",
+  "description": "Imported from GitHub: alzoubi93/Cirzuit-footprints-8.8",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

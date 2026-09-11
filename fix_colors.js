@@ -1,0 +1,16 @@
+const fs = require('fs');
+const glob = require('glob');
+
+const files = glob.sync('src/components/editor/footprint-families/*.tsx');
+files.forEach(file => {
+  let content = fs.readFileSync(file, 'utf8');
+  content = content.replace(
+    /<label className="text-\[10px\] font-semibold text-slate-300 flex items-center justify-between mb-1.5">\s*<span>Quick Standard Packages<\/span>\s*<\/label>/g,
+    `<div className="flex items-center justify-between mb-1.5">
+              <span className="text-[11px] font-bold text-teal-300 flex items-center gap-1.5">
+                <span>Quick Standard Packages</span>
+              </span>
+            </div>`
+  );
+  fs.writeFileSync(file, content);
+});

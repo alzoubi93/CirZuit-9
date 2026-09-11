@@ -1,0 +1,359 @@
+953-    });
+954-
+955-    return errors;
+956-  }, [pcb, schematic, lang, trackNetMap]);
+957-
+958:  const selection = useMemo<PcbSelection | null>(() => {
+959-    if (selectedId) {
+960-      if (pcb.footprints?.some(f => f.id === selectedId)) {
+961-        return { kind: "footprint", id: selectedId };
+962-      }
+963-      if (pcb.vias?.some(v => v.id === selectedId)) {
+--
+1040-  };
+1041-  const measureStartedOnThisDown = useRef(false);
+1042-  const [panStart, setPanStart] = useState<{ x: number; y: number; pan: { x: number; y: number } } | null>(null);
+1043-
+1044-  useEffect(() => {
+1045:    if (selection) {
+1046-      setPcbLeftMenuOpen(true);
+1047-    } else {
+1048-      setPcbLeftMenuOpen(false);
+1049-    }
+1050:  }, [selection]);
+1051-
+1052-  useEffect(() => {
+1053-    setDraftTrack(null);
+1054-    setMeasureA(null);
+1055-    setUnconfirmedTracks([]);
+--
+1092-      }
+1093-    }
+1094-  }, [selectedId, selectedTrackId, pcb.footprints, pcb.vias, pcb.pads, pcb.measures, pcb.texts, pcb.tracks]);
+1095-
+1096-  useEffect(() => {
+1097:    if (!selection || selection.kind !== "footprint" || dragFp) {
+1098-      if (!dragFp && guides.length > 0) {
+1099-        setGuides([]);
+1100-      }
+1101-      return;
+1102-    }
+1103:    const fp = pcb.footprints.find(f => f.id === selection.id);
+1104-    if (!fp) return;
+1105-    const bbox = footprintBBox(fp);
+1106-    setGuides([
+1107-      { x: bbox.x, y: bbox.y - 2, x2: bbox.x + bbox.w, y2: bbox.y - 2, type: "dimension", label: fmt(bbox.w, unit) },
+1108-      { x: bbox.x - 2, y: bbox.y, x2: bbox.x - 2, y2: bbox.y + bbox.h, type: "dimension", label: fmt(bbox.h, unit) }
+1109-    ]);
+1110:  }, [selection, pcb.footprints, unit, dragFp, guides.length]);
+1111-
+1112-  useEffect(() => {
+1113-    const handleKeyDown = (e: KeyboardEvent) => {
+1114-      if (e.key === "Delete" || e.key === "Backspace") {
+1115-        if (document.activeElement?.tagName === "INPUT" || document.activeElement?.tagName === "SELECT" || document.activeElement?.tagName === "TEXTAREA") {
+1116-          return;
+1117-        }
+1118:        if (selection) {
+1119:          if (selection.kind === "track") {
+1120:            setPcb((d) => ({ ...d, tracks: d.tracks.filter((t) => t.id !== selection.id) }));
+1121-            setSelection(null);
+1122:          } else if (selection.kind === "via") {
+1123:            setPcb((d) => ({ ...d, vias: d.vias.filter((v) => v.id !== selection.id) }));
+1124-            setSelection(null);
+1125:          } else if (selection.kind === "pad") {
+1126:            setPcb((d) => ({ ...d, pads: d.pads.filter((p) => p.id !== selection.id) }));
+1127-            setSelection(null);
+1128:          } else if (selection.kind === "text") {
+1129:            setPcb((d) => ({ ...d, texts: (d.texts || []).filter((t) => t.id !== selection.id) }));
+1130-            setSelection(null);
+1131:          } else if (selection.kind === "measure") {
+1132:            setPcb((d) => ({ ...d, measures: d.measures.filter((m) => m.id !== selection.id) }));
+1133-            setSelection(null);
+1134:          } else if (selection.kind === "footprint") {
+1135:            setPcb((d) => ({ ...d, footprints: d.footprints.filter((f) => f.id !== selection.id) }));
+1136-            setSelection(null);
+1137-          }
+1138-        }
+1139-      } else if (e.key === "Escape") {
+1140-        setDraftTrack(null);
+--
+1142-        setUnconfirmedTracks([]);
+1143-      }
+1144-    };
+1145-    window.addEventListener("keydown", handleKeyDown);
+1146-    return () => window.removeEventListener("keydown", handleKeyDown);
+1147:  }, [selection, setPcb]);
+1148-
+1149-  useEffect(() => {
+1150-    function handleClickOutside(event: MouseEvent) {
+1151-      if (
+1152-        footprintGenOpen &&
+--
+1933-
+1934-  const updateLayer = (id: PcbLayerId, patch: Partial<PcbDoc["layers"][number]>) =>
+1935-    setPcb((d) => ({ ...d, layers: d.layers.map((l) => l.id === id ? { ...l, ...patch } : l) }));
+1936-
+1937-  const deleteSelection = () => {
+1938:    if (!selection) return;
+1939-    setPcb((d) => ({
+1940-      ...d,
+1941:      tracks: selection.kind === "track" ? d.tracks.filter((x) => x.id !== selection.id) : d.tracks,
+1942:      vias: selection.kind === "via" ? d.vias.filter((x) => x.id !== selection.id) : d.vias,
+1943:      pads: selection.kind === "pad" ? d.pads.filter((x) => x.id !== selection.id) : d.pads,
+1944:      measures: selection.kind === "measure" ? d.measures.filter((x) => x.id !== selection.id) : d.measures,
+1945:      footprints: selection.kind === "footprint" ? d.footprints.filter((x) => x.id !== selection.id) : d.footprints,
+1946:      texts: selection.kind === "text" ? (d.texts || []).filter((x) => x.id !== selection.id) : d.texts,
+1947-    }));
+1948-    setSelection(null);
+1949-  };
+1950-
+1951-  const rotateSelection = () => {
+1952:    if (!selection) return;
+1953:    if (selection.kind === "footprint") {
+1954-      setPcb((d) => ({
+1955-        ...d,
+1956-        footprints: d.footprints.map((f) =>
+1957:          f.id === selection.id ? { ...f, rotation: (f.rotation + 90) % 360 } : f
+1958-        ),
+1959-      }));
+1960:    } else if (selection.kind === "text") {
+1961-      setPcb((d) => ({
+1962-        ...d,
+1963-        texts: (d.texts || []).map((t) =>
+1964:          t.id === selection.id ? { ...t, rotation: (t.rotation + 90) % 360 } : t
+1965-        ),
+1966-      }));
+1967-    }
+1968-  };
+1969-
+--
+2518-              )}
+2519-
+2520-              {pcb.pads.map((p) => {
+2521-                const layer = pcb.layers.find((l) => l.id === p.layer);
+2522-                if (!layer?.visible) return null;
+2523:                const sel = selection?.kind === "pad" && selection.id === p.id;
+2524-                const isGroupSel = groupSelected?.pads.includes(p.id);
+2525-                const padColor = isGroupSel ? "#f59e0b" : sel ? "#60a5fa" : (p.layer === "bottom_copper" ? "#3b82f6" : "#22c55e");
+2526-                return (
+2527-                  <g key={p.id} onPointerDown={(e) => {
+2528-                    e.stopPropagation();
+--
+2552-                  const trackNetId = trackNetMap.get(tr.id);
+2553-                  const isHi = trackNetId !== undefined && highlightedNetIds.includes(trackNetId);
+2554-                  const d = tr.points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x} ${p.y}`).join(" ");
+2555-                  return (
+2556-                    <g key={tr.id}>
+2557:                      {/* Wider transparent overlay for easy selection clicking */}
+2558-                      <path d={d} stroke="transparent" strokeWidth={tr.width + 1.2} fill="none" strokeLinecap="round" strokeLinejoin="round"
+2559-                        onPointerDown={(e) => {
+2560-                          e.stopPropagation();
+2561-                          setSelectedTrackId(tr.id);
+2562-                          setSelectedId(null);
+--
+2567-                      />
+2568-                      {/* Neon glow effect for highlighted track */}
+2569-                      {isHi && (
+2570-                        <path d={d} stroke="#3b82f6" strokeWidth={tr.width * 2.5} fill="none" strokeLinecap="round" strokeLinejoin="round" opacity={0.5} style={{ pointerEvents: "none" }} />
+2571-                      )}
+2572:                      {/* Group selection amber glow */}
+2573-                      {groupSelected?.tracks.includes(tr.id) && (
+2574-                        <path d={d} stroke="#f59e0b" strokeWidth={tr.width + 1.2} fill="none" strokeLinecap="round" strokeLinejoin="round" opacity={0.7} style={{ pointerEvents: "none" }} />
+2575-                      )}
+2576:                      {/* Semi-transparent blue selection highlight outline */}
+2577-                      {sel && (
+2578-                        <path d={d} stroke="rgba(59, 130, 246, 0.6)" strokeWidth={tr.width + 0.8} fill="none" strokeLinecap="round" strokeLinejoin="round" opacity={0.8} style={{ pointerEvents: "none" }} />
+2579-                      )}
+2580-                      <path d={d} stroke={sel ? "#3b82f6" : (isHi ? "#2563eb" : (tr.layer === "bottom_copper" ? "#3b82f6" : "#ef4444"))} strokeWidth={sel ? tr.width * 1.5 : tr.width}
+2581-                        fill="none" strokeLinecap="round" strokeLinejoin="round"
+--
+2585-                  );
+2586-                });
+2587-              })()}
+2588-
+2589-              {pcb.vias.map((v) => {
+2590:                const sel = selection?.kind === "via" && selection.id === v.id;
+2591-                return (
+2592-                  <g key={v.id} onPointerDown={(e) => {
+2593-                    e.stopPropagation();
+2594-                    if (tool === "select") {
+2595-                      setSelection({ kind: "via", id: v.id });
+--
+2639-              })}
+2640-
+2641-              {(pcb.texts || []).map((t) => {
+2642-                const layer = pcb.layers.find((l) => l.id === t.layer);
+2643-                if (layer && !layer.visible) return null;
+2644:                const sel = selection?.kind === "text" && selection.id === t.id;
+2645-                const isGroupSel = groupSelected?.texts.includes(t.id);
+2646-                const col = isGroupSel ? "#f59e0b" : sel ? "#3b82f6" : (t.layer === "silkscreen" || t.layer === "bottom_silkscreen" ? "#22c55e" : (layer ? layer.color : "#22c55e"));
+2647-                return (
+2648-                  <g
+2649-                    key={t.id}
+--
+2703-                  </g>
+2704-                );
+2705-              })}
+2706-
+2707-              {pcb.footprints.map((fp) => {
+2708:                const sel = selection?.kind === "footprint" && selection.id === fp.id;
+2709-                const bb = footprintBBox(fp);
+2710-                return (
+2711-                  <g key={fp.id}
+2712-                    onPointerDown={(e) => {
+2713-                      if (tool !== "select") return;
+--
+3217-                  );
+3218-                }
+3219-                return null;
+3220-              })}
+3221-
+3222:              {/* Marquee selection box visualizer */}
+3223-              {marqueeStart && marqueeEnd && (
+3224-                <rect
+3225-                  x={Math.min(marqueeStart.x, marqueeEnd.x)}
+3226-                  y={Math.min(marqueeStart.y, marqueeEnd.y)}
+3227-                  width={Math.abs(marqueeStart.x - marqueeEnd.x)}
+--
+3298-                      exit={{ height: 0, opacity: 0 }}
+3299-                      className="flex flex-col overflow-hidden bg-red-950/25"
+3300-                    >
+3301-                      <div className="h-px w-full bg-slate-800/80" />
+3302-                      
+3303:                      {/* Delete button for group selection */}
+3304-                      <Button
+3305-                        variant="ghost"
+3306-                        size="icon"
+3307-                        className="h-12 w-12 rounded-none text-red-500 hover:text-red-400 hover:bg-red-500/10"
+3308-                        onClick={deleteSelectedElements}
+--
+3310-                      >
+3311-                        <Trash2 className="h-5 w-5 animate-pulse" />
+3312-                      </Button>
+3313-                    </motion.div>
+3314-                  )}
+3315:                  {pcbLeftMenuOpen && selection && !hasGroupSel && (
+3316-                    <motion.div
+3317-                      initial={{ height: 0, opacity: 0 }}
+3318-                      animate={{ height: "auto", opacity: 1 }}
+3319-                      exit={{ height: 0, opacity: 0 }}
+3320-                      className="flex flex-col overflow-hidden"
+3321-                    >
+3322-                      <div className="h-px w-full bg-slate-800/80" />
+3323-                      
+3324-                      {/* Rotate button - show only for footprints and texts */}
+3325:                      {(selection.kind === "footprint" || selection.kind === "text") && (
+3326-                        <>
+3327-                          <Button
+3328-                            variant="ghost"
+3329-                            size="icon"
+3330-                            className="h-12 w-12 rounded-none text-slate-300 hover:bg-slate-800/50"
+--
+3359-        {propsOpen && (
+3360-          <aside className="w-80 border-s bg-card flex flex-col overflow-hidden absolute md:relative inset-y-0 end-0 z-40 md:z-auto shadow-lg md:shadow-none transition-all">
+3361-            <div className="px-4 py-3 border-b flex items-center justify-between bg-muted/20 shrink-0">
+3362-              <div className="font-semibold text-sm flex items-center gap-2">
+3363-                <Settings2 className="size-4 text-muted-foreground" />
+3364:                {selection ? (lang === "ar" ? "خصائص العنصر" : "Properties") : (lang === "ar" ? "خصائص اللوحة" : "Board Properties")}
+3365-              </div>
+3366-              <Button variant="ghost" size="icon" onClick={() => setPropsOpen(false)} className="h-8 w-8">
+3367-                <X className="size-4" />
+3368-              </Button>
+3369-            </div>
+--
+3399-                    )}
+3400-                  </span>
+3401-                </div>
+3402-              </div>
+3403-
+3404:              {!selection && (
+3405-                <div className="space-y-6">
+3406-                  <section className="space-y-4">
+3407-                    <div className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground border-b pb-1.5">{lang === "ar" ? "أبعاد اللوحة" : "Board Setup"}</div>
+3408-                    <div className="grid grid-cols-2 gap-3">
+3409-                      <BoardNumberInput
+--
+3546-                    </ul>
+3547-                  </section>
+3548-                </div>
+3549-              )}
+3550-
+3551:              {selection && selection.kind !== "net" && selection.kind !== "footprint" && (
+3552:                <SelectionInspector pcb={pcb} setPcb={setPcb} selection={selection as { kind: string; id: string }} setSelection={setSelection} lang={lang} />
+3553-              )}
+3554:              {selection?.kind === "footprint" && (
+3555:                <FootprintInspector pcb={pcb} setPcb={setPcb} id={selection.id} lang={lang} />
+3556-              )}
+3557-              
+3558:              {selection?.kind === "net" && (
+3559-                (() => {
+3560-                  const idx = buildNetIndex(schematic);
+3561:                  const net = idx.nets.find((n) => n.id === selection.id);
+3562-                  if (!net) return null;
+3563-                  return (
+3564-                    <div className="space-y-4">
+3565-                      <div className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-1">{lang === "ar" ? "معلومات الشبكة" : "Net Info"}</div>
+3566-                      <div className="p-3 bg-primary/5 rounded-lg border border-primary/20 ring-1 ring-primary/10">
+--
+3774-}
+3775-
+3776-function SelectionInspector({
+3777-  pcb,
+3778-  setPcb,
+3779:  selection,
+3780-  setSelection,
+3781-  lang,
+3782-}: {
+3783-  pcb: PcbDoc;
+3784-  setPcb: (u: (p: PcbDoc) => PcbDoc) => void;
+3785:  selection: { kind: string; id: string };
+3786-  setSelection: (sel: any) => void;
+3787-  lang: string;
+3788-}) {
+3789-  const unit = pcb.unit;
+3790:  if (selection.kind === "track") {
+3791:    const tr = pcb.tracks.find((x) => x.id === selection.id);
+3792-    if (!tr) return null;
+3793-    return (
+3794-      <div className="space-y-4">
+3795-        <div className="flex items-center justify-between">
+3796-          <div className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">{lang === "ar" ? "مسار" : "Track"}</div>
+--
+3827-          </select>
+3828-        </div>
+3829-      </div>
+3830-    );
+3831-  }
+3832:  if (selection.kind === "via") {
+3833:    const v = pcb.vias.find((x) => x.id === selection.id);
+3834-    if (!v) return null;
+3835-    return (
+3836-      <div className="space-y-4">
+3837-        <div className="flex items-center justify-between">
+3838-          <div className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">{lang === "ar" ? "عبر النحاس" : "Via"}</div>
+--
+3866-          />
+3867-        </div>
+3868-      </div>
+3869-    );
+3870-  }
+3871:  if (selection.kind === "pad") {
+3872:    const p = pcb.pads.find((x) => x.id === selection.id);
+3873-    if (!p) return null;
+3874-    return (
+3875-      <div className="space-y-4">
+3876-        <div className="flex items-center justify-between">
+3877-          <div className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">{lang === "ar" ? "وسادة" : "Pad"}</div>
+--
+3926-          />
+3927-        </div>
+3928-      </div>
+3929-    );
+3930-  }
+3931:  if (selection.kind === "text") {
+3932:    const t = (pcb.texts || []).find((x) => x.id === selection.id);
+3933-    if (!t) return null;
+3934-    return (
+3935-      <div className="space-y-4">
+3936-        <div className="flex items-center justify-between">
+3937-          <div className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">{lang === "ar" ? "نص ملصق" : "Text Label"}</div>

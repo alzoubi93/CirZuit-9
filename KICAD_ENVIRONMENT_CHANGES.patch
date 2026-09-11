@@ -1,0 +1,1100 @@
+--- a/src/lib/kicadSymbol.tsx
++++ b/src/lib/kicadSymbol.tsx
+@@ -1,5 +1,15 @@
+ /**
+- * KiCad .kicad_sym symbol library parser + accurate SVG renderer.
++ * CirZuit KiCad Symbol Environment.
++ *
++ * This module is intentionally structured as a KiCad-compatible symbol
++ * runtime, not as a one-off file converter:
++ *
++ *   .kicad_sym -> S-expression reader -> KiCad symbol object model
++ *               -> unit/body-style selection -> geometry/text transforms
++ *               -> CirZuit SVG renderer
++ *
++ * The reader is only the file-I/O boundary. The rest of the application
++ * works with KiCad-style symbol objects.
+  *
+  * Based on the official KiCad S-expression symbol library format
+  * (https://dev-docs.kicad.org/en/file-formats/sexpr-symbol-lib/)
+@@ -135,11 +145,61 @@
+ export type KiCadStroke = { width: number; type: string };
+ export type KiCadFill = { type: "none" | "outline" | "background" | string };
+ 
++export interface KiCadBezier {
++  type: "bezier";
++  pts: { x: number; y: number }[];
++  stroke: KiCadStroke;
++  fill: KiCadFill;
++  unit?: number;
++  bodyStyle?: number;
++}
++
++export interface KicadTextJustification {
++  horizontal?: "left" | "center" | "right";
++  vertical?: "top" | "center" | "bottom";
++  mirror?: boolean;
++}
++
++export interface KicadFont {
++  face?: string;
++  size: { x: number; y: number };
++  thickness?: number;
++  bold?: boolean;
++  italic?: boolean;
++}
++
++export interface KicadTextEffects {
++  font: KicadFont;
++  justify: KicadTextJustification;
++  lineSpacing?: number;
++  hidden?: boolean;
++}
++
++export interface KiCadText {
++  type: "text";
++  text: string;
++  at: { x: number; y: number; angle: number };
++  effects: KicadTextEffects;
++  hide?: boolean;
++  unit?: number;
++  bodyStyle?: number;
++}
++
++export interface KiCadProperty {
++  name: string;
++  value: string;
++  at: { x: number; y: number; angle: number };
++  effects: KicadTextEffects;
++  hide: boolean;
++}
++
+ export interface KiCadPolyline {
+   type: "polyline";
+   pts: { x: number; y: number }[];
+   stroke: KiCadStroke;
+   fill: KiCadFill;
++  unit?: number;
++  bodyStyle?: number;
+ }
+ 
+ export interface KiCadRectangle {
+@@ -148,6 +208,8 @@
+   end: { x: number; y: number };
+   stroke: KiCadStroke;
+   fill: KiCadFill;
++  unit?: number;
++  bodyStyle?: number;
+ }
+ 
+ export interface KiCadCircle {
+@@ -156,6 +218,8 @@
+   radius: number;
+   stroke: KiCadStroke;
+   fill: KiCadFill;
++  unit?: number;
++  bodyStyle?: number;
+ }
+ 
+ export interface KiCadArc {
+@@ -165,15 +229,8 @@
+   end: { x: number; y: number };
+   stroke: KiCadStroke;
+   fill: KiCadFill;
+-}
+-
+-export interface KiCadText {
+-  type: "text";
+-  text: string;
+-  at: { x: number; y: number; angle: number };
+-  size: number;
+-  justify?: string;
+-  hide?: boolean;
++  unit?: number;
++  bodyStyle?: number;
+ }
+ 
+ export type KiCadGraphic =
+@@ -181,39 +238,63 @@
+   | KiCadRectangle
+   | KiCadCircle
+   | KiCadArc
++  | KiCadBezier
+   | KiCadText;
+ 
+ export interface KiCadPin {
+-  electrical: string; // input | output | bidirectional | passive | power_in | ...
+-  shape: string; // line | inverted | clock | ...
++  electrical: string;
++  shape: string;
+   at: { x: number; y: number; angle: number };
+   length: number;
+   name: string;
+   number: string;
++  nameEffects: KicadTextEffects;
++  numberEffects: KicadTextEffects;
+   hide?: boolean;
++  unit?: number;
++  bodyStyle?: number;
++}
++
++export interface KicadTransform {
++  x: number;
++  y: number;
++  rotation: number;
++  mirrorX: boolean;
++  mirrorY: boolean;
++}
++
++export interface KicadSymbolUnit {
++  unit: number;
++  style: number;
++  graphics: KiCadGraphic[];
++  pins: KiCadPin[];
+ }
+ 
+ export interface KiCadParsedSymbol {
+   name: string;
+-  libNickname?: string; // e.g. "Device"
++  libNickname?: string;
+   reference: string;
+   value: string;
+   description?: string;
+   keywords?: string;
+   footprint?: string;
++  properties: KiCadProperty[];
+   pinNamesOffset: number;
+   pinNamesHide: boolean;
+   pinNumbersHide: boolean;
+-  units: {
+-    unit: number;
+-    style: number;
+-    graphics: KiCadGraphic[];
+-    pins: KiCadPin[];
+-  }[];
+-  /** Combined graphics + pins of the primary unit (unit 1 / style 1) plus body (0_1) */
++  units: KicadSymbolUnit[];
++  selectedUnit: number;
++  selectedBodyStyle: number;
++  extends?: string;
+   bodyGraphics: KiCadGraphic[];
+   pins: KiCadPin[];
+   bbox: { minX: number; minY: number; maxX: number; maxY: number };
++}
++
++export interface KicadSymbolEnvironment {
++  version: number;
++  symbols: Map<string, KiCadParsedSymbol>;
++  resolve(name: string, library?: string): KiCadParsedSymbol | undefined;
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -250,6 +331,75 @@
+ function parseAt(node: SExpr[] | null): { x: number; y: number; angle: number } {
+   if (!node) return { x: 0, y: 0, angle: 0 };
+   return { x: num(node[1]), y: num(node[2]), angle: num(node[3], 0) };
++}
++
++function parseJustification(node: SExpr[] | null): KicadTextJustification {
++  if (!node) return {};
++  const values = node.slice(1).map(String);
++  const result: KicadTextJustification = {};
++  for (const value of values) {
++    if (value === "left" || value === "right") result.horizontal = value;
++    else if (value === "top" || value === "bottom") result.vertical = value;
++    else if (value === "mirror") result.mirror = true;
++  }
++  if (!result.horizontal) result.horizontal = "center";
++  if (!result.vertical) result.vertical = "center";
++  return result;
++}
++
++function parseTextEffects(node: SExpr[] | null, defaultSize = 1.27): KicadTextEffects {
++  const font = findChild(node || [], "font");
++  const sizeNode = findChild(font || [], "size");
++  const sizeX = num(sizeNode?.[1], defaultSize);
++  const sizeY = num(sizeNode?.[2], sizeX);
++  const thicknessNode = findChild(font || [], "thickness");
++  const faceNode = findChild(font || [], "face");
++  const lineSpacingNode = findChild(node || [], "line_spacing");
++
++  return {
++    font: {
++      face: typeof faceNode?.[1] === "string" ? String(faceNode[1]) : undefined,
++      size: { x: sizeX, y: sizeY },
++      thickness: thicknessNode ? num(thicknessNode[1]) : undefined,
++      bold: !!findChild(font || [], "bold"),
++      italic: !!findChild(font || [], "italic"),
++    },
++    justify: parseJustification(findChild(node || [], "justify")),
++    lineSpacing: lineSpacingNode ? num(lineSpacingNode[1]) : undefined,
++    hidden: !!findChild(node || [], "hide"),
++  };
++}
++
++function parseTextNode(item: SExpr[], unit?: number, bodyStyle?: number): KiCadText | null {
++  if (head(item) !== "text") return null;
++  const textVal = typeof item[1] === "string" ? item[1] : "";
++  const at = parseAt(findChild(item, "at"));
++  const effects = parseTextEffects(findChild(item, "effects"));
++  const hidden = effects.hidden || !!findChild(item, "hide");
++  return {
++    type: "text",
++    text: textVal,
++    at,
++    effects,
++    hide: hidden,
++    unit,
++    bodyStyle,
++  };
++}
++
++function parsePropertyNode(item: SExpr[]): KiCadProperty | null {
++  if (head(item) !== "property") return null;
++  const name = String(item[1] ?? "");
++  const value = String(item[2] ?? "");
++  const at = parseAt(findChild(item, "at"));
++  const effects = parseTextEffects(findChild(item, "effects"));
++  return {
++    name,
++    value,
++    at,
++    effects,
++    hide: !!findChild(item, "hide") || !!effects.hidden,
++  };
+ }
+ 
+ function parseGraphic(item: SExpr[]): KiCadGraphic | null {
+@@ -299,35 +449,21 @@
+       fill: parseFill(findChild(item, "fill")),
+     };
+   }
++  if (kind === "bezier") {
++    return {
++      type: "bezier",
++      pts: parsePts(findChild(item, "pts")),
++      stroke: parseStroke(findChild(item, "stroke")),
++      fill: parseFill(findChild(item, "fill")),
++    };
++  }
+   if (kind === "text") {
+-    // (text "..." (at x y angle) (effects (font (size sx sy)) (justify ...) (hide yes)))
+-    const textVal = typeof item[1] === "string" ? item[1] : "";
+-    const at = parseAt(findChild(item, "at"));
+-    const effects = findChild(item, "effects");
+-    let size = 1.27;
+-    let justify: string | undefined;
+-    let hide = false;
+-    if (effects) {
+-      const font = findChild(effects, "font");
+-      if (font) {
+-        const sz = findChild(font, "size");
+-        if (sz) size = num(sz[1], 1.27);
+-      }
+-      const j = findChild(effects, "justify");
+-      if (j) justify = j.slice(1).map(String).join(" ");
+-      if (effects.some((c) => isList(c) && head(c) === "hide")) hide = true;
+-      // also (hide yes) as sibling of effects sometimes
+-    }
+-    for (const c of item) {
+-      if (isList(c) && head(c) === "hide") hide = true;
+-    }
+-    return { type: "text", text: textVal, at, size, justify, hide };
++    return parseTextNode(item);
+   }
+   return null;
+ }
+ 
+-function parsePin(item: SExpr[]): KiCadPin | null {
+-  // (pin electrical shape (at x y angle) (length L) (name "..." ...) (number "..." ...))
++function parsePin(item: SExpr[], unit?: number, bodyStyle?: number): KiCadPin | null {
+   if (head(item) !== "pin") return null;
+   const electrical = String(item[1] ?? "passive");
+   const shape = String(item[2] ?? "line");
+@@ -338,11 +474,22 @@
+   const numberNode = findChild(item, "number");
+   const name = typeof nameNode?.[1] === "string" ? nameNode[1] : "~";
+   const number = typeof numberNode?.[1] === "string" ? numberNode[1] : "";
+-  let hide = false;
+-  for (const c of item) {
+-    if (isList(c) && head(c) === "hide") hide = true;
+-  }
+-  return { electrical, shape, at, length, name, number, hide };
++  const nameEffects = parseTextEffects(findChild(nameNode || [], "effects"), 1.27);
++  const numberEffects = parseTextEffects(findChild(numberNode || [], "effects"), 1.27);
++  const hide = !!findChild(item, "hide");
++  return {
++    electrical,
++    shape,
++    at,
++    length,
++    name,
++    number,
++    nameEffects,
++    numberEffects,
++    hide,
++    unit,
++    bodyStyle,
++  };
+ }
+ 
+ /**
+@@ -351,138 +498,133 @@
+ function parseOneSymbol(symNode: SExpr[], libNickname?: string): KiCadParsedSymbol | null {
+   if (head(symNode) !== "symbol") return null;
+   const name = String(symNode[1] ?? "");
+-  if (!name || name.includes("_")) {
+-    // skip nested unit symbols when called at top level; they are handled below
+-  }
+-
+-  let reference = "U";
+-  let value = name;
++  if (!name || /_\d+_\d+$/.test(name)) return null;
++
++  let reference = "";
++  let value = "";
+   let description = "";
+   let keywords = "";
+   let footprint = "";
+   let pinNamesOffset = 0.508;
+   let pinNamesHide = false;
+   let pinNumbersHide = false;
+-
+-  const unitsMap = new Map<string, { unit: number; style: number; graphics: KiCadGraphic[]; pins: KiCadPin[] }>();
++  let extendsName: string | undefined;
++
++  const properties: KiCadProperty[] = [];
++  const unitsMap = new Map<string, KicadSymbolUnit>();
++
++  const ensureUnit = (unit: number, style: number): KicadSymbolUnit => {
++    const key = `${unit}_${style}`;
++    const existing = unitsMap.get(key);
++    if (existing) return existing;
++    const created: KicadSymbolUnit = { unit, style, graphics: [], pins: [] };
++    unitsMap.set(key, created);
++    return created;
++  };
+ 
+   for (const item of symNode) {
+     if (!isList(item)) continue;
+     const h = head(item);
++
+     if (h === "property") {
+-      const propName = String(item[1] ?? "");
+-      const propVal = String(item[2] ?? "");
+-      if (propName === "Reference") reference = propVal;
+-      else if (propName === "Value") value = propVal;
+-      else if (propName === "Description") description = propVal;
+-      else if (propName === "ki_keywords") keywords = propVal;
+-      else if (propName === "Footprint") footprint = propVal;
++      const prop = parsePropertyNode(item);
++      if (prop) {
++        properties.push(prop);
++        if (prop.name === "Reference") reference = prop.value;
++        else if (prop.name === "Value") value = prop.value;
++        else if (prop.name === "Description") description = prop.value;
++        else if (prop.name === "ki_keywords") keywords = prop.value;
++        else if (prop.name === "Footprint") footprint = prop.value;
++      }
+     } else if (h === "pin_names") {
+       const off = findChild(item, "offset");
+       if (off) pinNamesOffset = num(off[1], 0.508);
+-      if (item.some((c) => isList(c) && head(c) === "hide")) pinNamesHide = true;
++      if (findChild(item, "hide")) pinNamesHide = true;
+     } else if (h === "pin_numbers") {
+-      if (item.some((c) => isList(c) && head(c) === "hide")) pinNumbersHide = true;
++      if (findChild(item, "hide")) pinNumbersHide = true;
++    } else if (h === "extends") {
++      extendsName = String(item[1] ?? "");
+     } else if (h === "symbol") {
+-      // nested unit: "Name_0_1" or "Name_1_1"
+       const unitName = String(item[1] ?? "");
+       const m = unitName.match(/_(\d+)_(\d+)$/);
+       const unit = m ? parseInt(m[1], 10) : 0;
+       const style = m ? parseInt(m[2], 10) : 1;
+-      const graphics: KiCadGraphic[] = [];
+-      const pins: KiCadPin[] = [];
++      const target = ensureUnit(unit, style);
++
+       for (const child of item) {
+         if (!isList(child)) continue;
+         const ch = head(child);
+         if (ch === "pin") {
+-          const p = parsePin(child as SExpr[]);
+-          if (p) pins.push(p);
++          const p = parsePin(child, unit, style);
++          if (p) target.pins.push(p);
+         } else {
+           const g = parseGraphic(child as SExpr[]);
+-          if (g) graphics.push(g);
++          if (g) {
++            (g as KiCadGraphic & { unit?: number; bodyStyle?: number }).unit = unit;
++            (g as KiCadGraphic & { unit?: number; bodyStyle?: number }).bodyStyle = style;
++            target.graphics.push(g);
++          }
+         }
+       }
+-      unitsMap.set(`${unit}_${style}`, { unit, style, graphics, pins });
+-    } else if (["polyline", "rectangle", "circle", "arc", "text"].includes(h || "")) {
+-      // rare: graphics directly on root symbol
+-      const g = parseGraphic(item as SExpr[]);
+-      if (g) {
+-        const key = "0_1";
+-        const u = unitsMap.get(key) || { unit: 0, style: 1, graphics: [], pins: [] };
+-        u.graphics.push(g);
+-        unitsMap.set(key, u);
+-      }
+     } else if (h === "pin") {
+-      const p = parsePin(item as SExpr[]);
+-      if (p) {
+-        const key = "1_1";
+-        const u = unitsMap.get(key) || { unit: 1, style: 1, graphics: [], pins: [] };
+-        u.pins.push(p);
+-        unitsMap.set(key, u);
+-      }
++      const target = ensureUnit(1, 1);
++      const p = parsePin(item, 1, 1);
++      if (p) target.pins.push(p);
+     }
+   }
+ 
+-  // Combine body (unit 0) + first electrical unit (unit 1) — standard KiCad display
+-  const body = unitsMap.get("0_1") || unitsMap.get("0_0") || { unit: 0, style: 1, graphics: [], pins: [] };
+-  const unit1 = unitsMap.get("1_1") || unitsMap.get("1_0") || { unit: 1, style: 1, graphics: [], pins: [] };
+-  // also merge any other unit-0 styles
+-  for (const [k, u] of unitsMap) {
+-    if (u.unit === 0 && k !== "0_1" && k !== "0_0") {
+-      body.graphics.push(...u.graphics);
++  // Symbols without explicit Reference/Value properties use KiCad defaults.
++  // Derived symbols deliberately keep these empty so the environment can
++  // inherit the base symbol's metadata.
++  if (!extendsName) {
++    if (!reference) reference = "U";
++    if (!value) value = name;
++  }
++
++  // KiCad's library representation keeps common body graphics in unit 0.
++  // At runtime we resolve the requested electrical unit plus common unit 0.
++  const primary = unitsMap.get("1_1") || unitsMap.get("1_0") || ensureUnit(1, 1);
++  const common = unitsMap.get("0_1") || unitsMap.get("0_0");
++
++  const bodyGraphics: KiCadGraphic[] = [
++    ...(common?.graphics ?? []),
++    ...primary.graphics,
++  ];
++  const pins = [...primary.pins];
++
++  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
++  const expand = (x: number, y: number) => {
++    minX = Math.min(minX, x); minY = Math.min(minY, y);
++    maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
++  };
++
++  for (const g of bodyGraphics) {
++    if (g.type === "polyline") g.pts.forEach(p => expand(p.x, p.y));
++    else if (g.type === "rectangle") { expand(g.start.x, g.start.y); expand(g.end.x, g.end.y); }
++    else if (g.type === "circle") { expand(g.center.x - g.radius, g.center.y - g.radius); expand(g.center.x + g.radius, g.center.y + g.radius); }
++    else if (g.type === "arc") { expand(g.start.x, g.start.y); expand(g.mid.x, g.mid.y); expand(g.end.x, g.end.y); }
++    else if (g.type === "bezier") { g.pts.forEach(p => expand(p.x, p.y)); }
++    else if (g.type === "text") {
++      const halfX = g.effects.font.size.x / 2;
++      const halfY = g.effects.font.size.y / 2;
++      expand(g.at.x - halfX, g.at.y - halfY);
++      expand(g.at.x + halfX, g.at.y + halfY);
+     }
+   }
+ 
+-  const bodyGraphics = [...body.graphics, ...unit1.graphics];
+-  const pins = [...unit1.pins];
+-
+-  // Bounding box from all geometry + pins
+-  let minX = Infinity,
+-    minY = Infinity,
+-    maxX = -Infinity,
+-    maxY = -Infinity;
+-  const expand = (x: number, y: number) => {
+-    minX = Math.min(minX, x);
+-    minY = Math.min(minY, y);
+-    maxX = Math.max(maxX, x);
+-    maxY = Math.max(maxY, y);
+-  };
+-  for (const g of bodyGraphics) {
+-    if (g.type === "polyline") g.pts.forEach((p) => expand(p.x, p.y));
+-    else if (g.type === "rectangle") {
+-      expand(g.start.x, g.start.y);
+-      expand(g.end.x, g.end.y);
+-    } else if (g.type === "circle") {
+-      expand(g.center.x - g.radius, g.center.y - g.radius);
+-      expand(g.center.x + g.radius, g.center.y + g.radius);
+-    } else if (g.type === "arc") {
+-      expand(g.start.x, g.start.y);
+-      expand(g.mid.x, g.mid.y);
+-      expand(g.end.x, g.end.y);
+-    } else if (g.type === "text") expand(g.at.x, g.at.y);
+-  }
+   for (const p of pins) {
++    // KiCad pin `at` is the electrical connection point. The pin body extends
++    // from that point toward the symbol by `length` along the pin angle.
+     expand(p.at.x, p.at.y);
+-    // pin tip
+-    const rad = (p.at.angle * Math.PI) / 180;
+-    // In KiCad pin angle 0 means the pin extends to the LEFT (toward -X)
+-    const tipX = p.at.x - Math.cos(rad) * p.length;
+-    const tipY = p.at.y - Math.sin(rad) * p.length;
+-    expand(tipX, tipY);
+-  }
++    const rad = p.at.angle * Math.PI / 180;
++    expand(p.at.x + Math.cos(rad) * p.length, p.at.y + Math.sin(rad) * p.length);
++  }
++
+   if (!Number.isFinite(minX)) {
+-    minX = -2.54;
+-    minY = -2.54;
+-    maxX = 2.54;
+-    maxY = 2.54;
+-  }
+-  // small padding
++    minX = -2.54; minY = -2.54; maxX = 2.54; maxY = 2.54;
++  }
++
+   const pad = 0.3;
+-  minX -= pad;
+-  minY -= pad;
+-  maxX += pad;
+-  maxY += pad;
+-
+   return {
+     name,
+     libNickname,
+@@ -491,13 +633,17 @@
+     description,
+     keywords,
+     footprint,
++    properties,
+     pinNamesOffset,
+     pinNamesHide,
+     pinNumbersHide,
+     units: Array.from(unitsMap.values()),
++    selectedUnit: primary.unit,
++    selectedBodyStyle: primary.style,
++    extends: extendsName,
+     bodyGraphics,
+     pins,
+-    bbox: { minX, minY, maxX, maxY },
++    bbox: { minX: minX - pad, minY: minY - pad, maxX: maxX + pad, maxY: maxY + pad },
+   };
+ }
+ 
+@@ -603,12 +749,15 @@
+   return `M ${sx} ${sy} A ${r} ${r} 0 ${large} ${sweep} ${ex} ${ey}`;
+ }
+ 
+-function pinEndpoint(pin: KiCadPin): { x: number; y: number } {
+-  // KiCad: angle 0 → pin body extends toward −X (left), connection point is at `at`
++function pinBodyEnd(pin: KiCadPin): { x: number; y: number } {
++  // KiCad stores `at` at the electrical connection point. The visible pin
++  // body extends from that point toward the symbol along its orientation.
++  // For angle 0 this is +X; e.g. 4002 input pins at -12.7 with length 7.62
++  // terminate at the symbol body at -5.08.
+   const rad = (pin.at.angle * Math.PI) / 180;
+   return {
+-    x: pin.at.x - Math.cos(rad) * pin.length,
+-    y: pin.at.y - Math.sin(rad) * pin.length,
++    x: pin.at.x + Math.cos(rad) * pin.length,
++    y: pin.at.y + Math.sin(rad) * pin.length,
+   };
+ }
+ 
+@@ -617,7 +766,7 @@
+  * (polylines, rectangles, circles, arcs, pin lines, optional pin numbers/names).
+  */
+ export function makeKiCadDrawFn(sym: KiCadParsedSymbol): (stroke: string) => JSX.Element {
+-  const { bbox, bodyGraphics, pins, pinNumbersHide, pinNamesHide } = sym;
++  const { bbox, bodyGraphics, pins, pinNumbersHide, pinNamesHide, pinNamesOffset } = sym;
+   const width = (bbox.maxX - bbox.minX) * KICAD_SCALE;
+   const height = (bbox.maxY - bbox.minY) * KICAD_SCALE;
+ 
+@@ -687,21 +836,56 @@
+             strokeLinecap="round"
+           />
+         );
+-      } else if (g.type === "text" && !g.hide) {
+-        const fs = Math.max(0.25, g.size * KICAD_SCALE * 0.85);
++      } else if (g.type === "bezier") {
++        if (g.pts.length >= 4) {
++          const p0 = g.pts[0], p1 = g.pts[1], p2 = g.pts[2], p3 = g.pts[3];
++          const d = `M ${kx(p0.x, bbox)} ${ky(p0.y, bbox)} C ${kx(p1.x, bbox)} ${ky(p1.y, bbox)} ${kx(p2.x, bbox)} ${ky(p2.y, bbox)} ${kx(p3.x, bbox)} ${ky(p3.y, bbox)}`;
++          elements.push(
++            <path
++              key={`bz-${i}`}
++              d={d}
++              stroke={stroke}
++              strokeWidth={sw}
++              fill={fill}
++            />
++          );
++        }
++      } else if (g.type === "text" && !g.hide && !g.effects.hidden) {
++        const effects = g.effects;
++        const fx = Math.max(0.05, effects.font.size.x * KICAD_SCALE);
++        const fy = Math.max(0.05, effects.font.size.y * KICAD_SCALE);
++        const anchor =
++          effects.justify.horizontal === "left" ? "start" :
++          effects.justify.horizontal === "right" ? "end" : "middle";
++        const baseline =
++          effects.justify.vertical === "top" ? "text-before-edge" :
++          effects.justify.vertical === "bottom" ? "text-after-edge" : "middle";
++        const x = kx(g.at.x, bbox);
++        const y = ky(g.at.y, bbox);
++        const mirror = effects.justify.mirror ? " scale(-1,1)" : "";
++        const rotate = -g.at.angle;
++        const weight = effects.font.bold ? "bold" : "normal";
++        const style = effects.font.italic ? "italic" : "normal";
+         elements.push(
+-          <text
++          <g
+             key={`tx-${i}`}
+-            x={kx(g.at.x, bbox)}
+-            y={ky(g.at.y, bbox)}
+-            fontSize={fs}
+-            fill={stroke}
+-            stroke="none"
+-            textAnchor="middle"
+-            dominantBaseline="middle"
++            transform={`translate(${x} ${y}) rotate(${rotate})${mirror}`}
+           >
+-            {g.text}
+-          </text>
++            <text
++              x={0}
++              y={0}
++              fontSize={fy}
++              textAnchor={anchor}
++              dominantBaseline={baseline}
++              fontWeight={weight}
++              fontStyle={style}
++              fill={stroke}
++              stroke="none"
++              style={{ letterSpacing: effects.lineSpacing ? `${effects.lineSpacing * KICAD_SCALE}px` : undefined }}
++            >
++              {g.text}
++            </text>
++          </g>
+         );
+       }
+     });
+@@ -709,11 +893,11 @@
+     // Pins
+     pins.forEach((pin, i) => {
+       if (pin.hide) return;
+-      const tip = pinEndpoint(pin);
++      const bodyEnd = pinBodyEnd(pin);
+       const x1 = kx(pin.at.x, bbox);
+       const y1 = ky(pin.at.y, bbox);
+-      const x2 = kx(tip.x, bbox);
+-      const y2 = ky(tip.y, bbox);
++      const x2 = kx(bodyEnd.x, bbox);
++      const y2 = ky(bodyEnd.y, bbox);
+       elements.push(
+         <line
+           key={`pin-${i}`}
+@@ -727,27 +911,93 @@
+         />
+       );
+ 
+-      // optional pin number
+-      if (!pinNumbersHide && pin.number) {
+-        const mx = (x1 + x2) / 2;
+-        const my = (y1 + y2) / 2;
++      // KiCad pin numbers/names use their own text effects. Keep the
++      // electrical connection point at `at`; the visible line ends at bodyEnd.
++      const mx = (x1 + x2) / 2;
++      const my = (y1 + y2) / 2;
++      const renderPinText = (
++        value: string,
++        effects: KicadTextEffects,
++        key: string,
++        offset: number,
++      ) => {
++        if (!value || effects.hidden) return;
++        const anchor =
++          effects.justify.horizontal === "left" ? "start" :
++          effects.justify.horizontal === "right" ? "end" : "middle";
++        const baseline =
++          effects.justify.vertical === "top" ? "text-before-edge" :
++          effects.justify.vertical === "bottom" ? "text-after-edge" : "middle";
++        const fx = Math.max(0.05, effects.font.size.x * KICAD_SCALE);
++        const fy = Math.max(0.05, effects.font.size.y * KICAD_SCALE);
+         elements.push(
+           <text
+-            key={`pn-${i}`}
++            key={key}
+             x={mx}
+-            y={my}
+-            fontSize={0.28}
++            y={my + offset}
++            fontSize={fy}
+             fill={stroke}
+             stroke="none"
+-            textAnchor="middle"
+-            dominantBaseline="middle"
+-            opacity={0.7}
++            textAnchor={anchor}
++            dominantBaseline={baseline}
++            fontWeight={effects.font.bold ? "bold" : "normal"}
++            fontStyle={effects.font.italic ? "italic" : "normal"}
++            opacity={1}
+           >
+-            {pin.number}
++            {value}
+           </text>
+         );
++        void fx;
++      };
++
++      if (!pinNumbersHide && pin.number) {
++        renderPinText(pin.number, pin.numberEffects, `pn-${i}`, 0);
++      }
++      if (!pinNamesHide && pin.name && pin.name !== "~") {
++        // KiCad's pin-name offset is measured from the pin body; this
++        // midpoint placement is deliberately kept in the same transformed
++        // coordinate system and is refined by the pin effects.
++        renderPinText(pin.name, pin.nameEffects, `pname-${i}`, pinNamesOffset * KICAD_SCALE);
+       }
+     });
++
++    // Symbol properties are part of the KiCad environment and share the
++    // same text-effects renderer. They are intentionally not used as pin
++    // connection geometry.
++    for (const prop of sym.properties ?? []) {
++      if (prop.hide || prop.effects.hidden) continue;
++      const x = kx(prop.at.x, bbox);
++      const y = ky(prop.at.y, bbox);
++      const fx = Math.max(0.05, prop.effects.font.size.x * KICAD_SCALE);
++      const fy = Math.max(0.05, prop.effects.font.size.y * KICAD_SCALE);
++      const anchor =
++        prop.effects.justify.horizontal === "left" ? "start" :
++        prop.effects.justify.horizontal === "right" ? "end" : "middle";
++      const baseline =
++        prop.effects.justify.vertical === "top" ? "text-before-edge" :
++        prop.effects.justify.vertical === "bottom" ? "text-after-edge" : "middle";
++      elements.push(
++        <g
++          key={`prop-${prop.name}`}
++          transform={`translate(${x} ${y}) rotate(${-prop.at.angle})${prop.effects.justify.mirror ? " scale(-1,1)" : ""}`}
++        >
++          <text
++            x={0}
++            y={0}
++            fontSize={fy}
++            textAnchor={anchor}
++            dominantBaseline={baseline}
++            fontWeight={prop.effects.font.bold ? "bold" : "normal"}
++            fontStyle={prop.effects.font.italic ? "italic" : "normal"}
++            fill={stroke}
++            stroke="none"
++          >
++            {prop.value}
++          </text>
++        </g>
++      );
++      void fx;
++    }
+ 
+     return (
+       <g data-kicad-symbol={sym.name} data-width={width} data-height={height}>
+@@ -767,11 +1017,11 @@
+   const height = Math.max(0.5, (bbox.maxY - bbox.minY) * KICAD_SCALE);
+ 
+   const pinDefs: PinDef[] = pins.map((p) => {
+-    // Connection point in our coordinate system is the outer tip of the pin
+-    const tip = pinEndpoint(p);
++    // The electrical connection point is KiCad's `at` coordinate.
++    // Pin length extends inward toward the symbol body.
+     return {
+-      x: kx(tip.x, bbox),
+-      y: ky(tip.y, bbox),
++      x: kx(p.at.x, bbox),
++      y: ky(p.at.y, bbox),
+       name: p.name && p.name !== "~" ? p.name : p.number || undefined,
+     };
+   });
+@@ -806,6 +1056,210 @@
+ }
+ 
+ // ---------------------------------------------------------------------------
++// KiCad Symbol Environment
++// ---------------------------------------------------------------------------
++
++/**
++ * Runtime environment mirroring the conceptual KiCad LIB_SYMBOL model:
++ * library symbol definitions contain units/body styles; a selected runtime
++ * view is then rendered without flattening the source into a generic
++ * hand-drawn SymbolDef.
++ */
++export function createKicadSymbolEnvironment(
++  parsedSymbols: KiCadParsedSymbol[],
++): KicadSymbolEnvironment {
++  const raw = new Map<string, KiCadParsedSymbol>();
++  for (const symbol of parsedSymbols) {
++    raw.set(
++      symbol.libNickname ? `${symbol.libNickname}:${symbol.name}` : symbol.name,
++      symbol,
++    );
++    raw.set(symbol.name, symbol);
++  }
++
++  const cache = new Map<string, KiCadParsedSymbol>();
++  const resolving = new Set<string>();
++
++  const cloneSymbol = (s: KiCadParsedSymbol): KiCadParsedSymbol => ({
++    ...s,
++    properties: s.properties.map(p => ({
++      ...p,
++      at: { ...p.at },
++      effects: {
++        ...p.effects,
++        font: { ...p.effects.font, size: { ...p.effects.font.size } },
++        justify: { ...p.effects.justify },
++      },
++    })),
++    units: s.units.map(u => ({
++      ...u,
++      graphics: [...u.graphics],
++      pins: u.pins.map(p => ({
++        ...p,
++        at: { ...p.at },
++        nameEffects: {
++          ...p.nameEffects,
++          font: { ...p.nameEffects.font, size: { ...p.nameEffects.font.size } },
++          justify: { ...p.nameEffects.justify },
++        },
++        numberEffects: {
++          ...p.numberEffects,
++          font: { ...p.numberEffects.font, size: { ...p.numberEffects.font.size } },
++          justify: { ...p.numberEffects.justify },
++        },
++      })),
++    })),
++    bodyGraphics: [...s.bodyGraphics],
++    pins: [...s.pins],
++    bbox: { ...s.bbox },
++  });
++
++  const resolve = (name: string, library?: string): KiCadParsedSymbol | undefined => {
++    const key = library ? `${library}:${name}` : name;
++    const direct = raw.get(key) ?? raw.get(name);
++    if (!direct) return undefined;
++    const cacheKey = direct.libNickname ? `${direct.libNickname}:${direct.name}` : direct.name;
++    if (cache.has(cacheKey)) return cache.get(cacheKey);
++    if (resolving.has(cacheKey)) return direct; // defensive cycle break
++
++    resolving.add(cacheKey);
++    let result = cloneSymbol(direct);
++
++    if (direct.extends) {
++      const base =
++        raw.get(direct.extends) ??
++        (direct.libNickname ? raw.get(`${direct.libNickname}:${direct.extends}`) : undefined);
++
++      if (base) {
++        const resolvedBase = resolve(base.name, base.libNickname);
++        if (resolvedBase) {
++          const ownUnits = result.units;
++          const mergedUnits = new Map<string, KicadSymbolUnit>();
++
++          for (const u of resolvedBase.units) {
++            mergedUnits.set(`${u.unit}_${u.style}`, {
++              unit: u.unit,
++              style: u.style,
++              graphics: [...u.graphics],
++              pins: [...u.pins],
++            });
++          }
++          for (const u of ownUnits) {
++            const keyU = `${u.unit}_${u.style}`;
++            const existing = mergedUnits.get(keyU);
++            if (existing) {
++              existing.graphics.push(...u.graphics);
++              if (u.pins.length) existing.pins = [...u.pins];
++            } else {
++              mergedUnits.set(keyU, {
++                unit: u.unit,
++                style: u.style,
++                graphics: [...u.graphics],
++                pins: [...u.pins],
++              });
++            }
++          }
++
++          result.units = Array.from(mergedUnits.values());
++          const selected = result.units.find(
++            u => u.unit === (direct.selectedUnit || 1) &&
++                 u.style === (direct.selectedBodyStyle || 1),
++          ) ?? result.units.find(u => u.unit === 1) ?? result.units[0];
++
++          const common = result.units.find(u => u.unit === 0 && u.style === (selected?.style ?? 1))
++            ?? result.units.find(u => u.unit === 0);
++          result.bodyGraphics = [
++            ...(common?.graphics ?? []),
++            ...(selected?.graphics ?? []),
++          ];
++          result.pins = [...(selected?.pins ?? [])];
++          result.bbox = computeKicadBoundingBox(result.bodyGraphics, result.pins);
++          result.reference = direct.reference || resolvedBase.reference;
++          result.value = direct.value || resolvedBase.value;
++          result.description = direct.description || resolvedBase.description;
++          result.keywords = direct.keywords || resolvedBase.keywords;
++          result.footprint = direct.footprint || resolvedBase.footprint;
++          result.properties = [
++            ...resolvedBase.properties.filter(bp =>
++              !direct.properties.some(dp => dp.name === bp.name)
++            ),
++            ...direct.properties,
++          ];
++        }
++      }
++    }
++
++    resolving.delete(cacheKey);
++    cache.set(cacheKey, result);
++    return result;
++  };
++
++  return {
++    version: 1,
++    symbols: raw,
++    resolve,
++  };
++}
++
++/** Recompute a conservative bounding box from the effective KiCad unit view. */
++function computeKicadBoundingBox(
++  graphics: KiCadGraphic[],
++  pins: KiCadPin[],
++): KiCadParsedSymbol["bbox"] {
++  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
++  const expand = (x: number, y: number) => {
++    minX = Math.min(minX, x); minY = Math.min(minY, y);
++    maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
++  };
++  for (const g of graphics) {
++    if (g.type === "polyline") g.pts.forEach(p => expand(p.x, p.y));
++    else if (g.type === "rectangle") {
++      expand(g.start.x, g.start.y); expand(g.end.x, g.end.y);
++    } else if (g.type === "circle") {
++      expand(g.center.x - g.radius, g.center.y - g.radius);
++      expand(g.center.x + g.radius, g.center.y + g.radius);
++    } else if (g.type === "arc") {
++      expand(g.start.x, g.start.y); expand(g.mid.x, g.mid.y); expand(g.end.x, g.end.y);
++    } else if (g.type === "text") {
++      const sx = g.effects.font.size.x / 2, sy = g.effects.font.size.y / 2;
++      expand(g.at.x - sx, g.at.y - sy); expand(g.at.x + sx, g.at.y + sy);
++    }
++  }
++  for (const p of pins) {
++    expand(p.at.x, p.at.y);
++    const end = pinBodyEnd(p);
++    expand(end.x, end.y);
++  }
++  if (!Number.isFinite(minX)) return { minX: -2.54, minY: -2.54, maxX: 2.54, maxY: 2.54 };
++  const pad = 0.3;
++  return { minX: minX - pad, minY: minY - pad, maxX: maxX + pad, maxY: maxY + pad };
++}
++
++/** Return the unit/body-style view without destroying the original definition. */
++export function resolveKicadUnit(
++  symbol: KiCadParsedSymbol,
++  unit = symbol.selectedUnit || 1,
++  bodyStyle = symbol.selectedBodyStyle || 1,
++): { graphics: KiCadGraphic[]; pins: KiCadPin[] } {
++  const common =
++    symbol.units.find(u => u.unit === 0 && u.style === bodyStyle) ??
++    symbol.units.find(u => u.unit === 0) ??
++    null;
++  const selected =
++    symbol.units.find(u => u.unit === unit && u.style === bodyStyle) ??
++    symbol.units.find(u => u.unit === unit) ??
++    null;
++
++  return {
++    graphics: [
++      ...(common?.graphics ?? []),
++      ...(selected?.graphics ?? []),
++    ],
++    pins: [...(selected?.pins ?? [])],
++  };
++}
++
++// ---------------------------------------------------------------------------
+ // Runtime registry for imported symbols with LocalStorage persistence
+ // ---------------------------------------------------------------------------
+ 
+@@ -815,7 +1269,7 @@
+ // Auto-load persisted KiCad symbols from localStorage on startup
+ if (typeof window !== "undefined" && typeof localStorage !== "undefined") {
+   try {
+-    const stored = localStorage.getItem("cirzuit_kicad_imported_v1");
++    const stored = localStorage.getItem("cirzuit_kicad_environment_v2");
+     if (stored) {
+       const parsedList: KiCadParsedSymbol[] = JSON.parse(stored);
+       if (Array.isArray(parsedList)) {
+@@ -839,7 +1293,7 @@
+   if (typeof window === "undefined" || typeof localStorage === "undefined") return;
+   try {
+     const list = Array.from(importedParsed.values());
+-    localStorage.setItem("cirzuit_kicad_imported_v1", JSON.stringify(list));
++    localStorage.setItem("cirzuit_kicad_environment_v2", JSON.stringify(list));
+   } catch (e) {
+     console.warn("Failed to persist KiCad symbols:", e);
+   }
+@@ -876,7 +1330,7 @@
+   importedParsed.clear();
+   if (typeof window !== "undefined" && typeof localStorage !== "undefined") {
+     try {
+-      localStorage.removeItem("cirzuit_kicad_imported_v1");
++      localStorage.removeItem("cirzuit_kicad_environment_v2");
+     } catch {
+       /* ignore storage errors */
+     }
+@@ -901,6 +1355,13 @@
+   if (parsed.length === 0) {
+     errors.push("No symbols found in file (is it a valid .kicad_sym?)");
+   }
++  // Build the KiCad environment before adapting symbols to CirZuit's legacy
++  // SymbolDef interface. Derived symbols are materialized here so the
++  // renderer receives the effective KiCad symbol, not an empty alias shell.
++  const environment = createKicadSymbolEnvironment(parsed);
++  parsed = parsed.map(p =>
++    environment.resolve(p.name, p.libNickname) ?? p
++  );
+   const symbols: SymbolDef[] = [];
+   for (const p of parsed) {
+     try {
+@@ -919,12 +1380,11 @@
+   // libFileName e.g. "Device.kicad_sym" or "Device"
+   const cleanName = libFileName.replace(/\.kicad_sym$/i, "").trim();
+   const name = `${cleanName}.kicad_sym`;
+-  const urls = [
+-    `https://gitlab.com/api/v4/projects/kicad%2Flibraries%2Fkicad-symbols/repository/files/${encodeURIComponent(name)}/raw?ref=8.0.0`,
+-    `https://gitlab.com/api/v4/projects/kicad%2Flibraries%2Fkicad-symbols/repository/files/${encodeURIComponent(name)}/raw?ref=7.0.11`,
+-    `https://gitlab.com/kicad/libraries/kicad-symbols/-/raw/8.0.0/${name}`,
+-    `https://gitlab.com/kicad/libraries/kicad-symbols/-/raw/7.0.11/${name}`,
+-  ];
++  const refs = ["master", "10.0.0", "9.0.0", "8.0.0", "7.0.11"];
++  const urls = refs.flatMap(ref => [
++    `https://gitlab.com/api/v4/projects/kicad%2Flibraries%2Fkicad-symbols/repository/files/${encodeURIComponent(name)}/raw?ref=${encodeURIComponent(ref)}`,
++    `https://gitlab.com/kicad/libraries/kicad-symbols/-/raw/${encodeURIComponent(ref)}/${name}`,
++  ]);
+   let lastErr = "";
+   for (const url of urls) {
+     try {
+@@ -950,7 +1410,7 @@
+     let page = 1;
+     while (page <= 3) {
+       const res = await fetch(
+-        `https://gitlab.com/api/v4/projects/kicad%2Flibraries%2Fkicad-symbols/repository/tree?ref=8.0.0&per_page=100&page=${page}`
++        `https://gitlab.com/api/v4/projects/kicad%2Flibraries%2Fkicad-symbols/repository/tree?ref=master&per_page=100&page=${page}`
+       );
+       if (!res.ok) break;
+       const data = await res.json();
